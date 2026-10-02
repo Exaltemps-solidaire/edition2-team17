@@ -7,3 +7,18 @@ hackathon.env
 id_*
 node_modules/
 __pycache__/
+
+# Build artifacts (TypeScript + Bun — bun.lock reste suivi, voir CCOE-RULES)
+dist/
+build/
+.gitlab-ci-local/
+*.log
+
+# Secrets locaux additionnels / OS / IDE
+.env.local
+*.local
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.swp

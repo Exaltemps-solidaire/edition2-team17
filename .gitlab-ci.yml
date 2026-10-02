@@ -1,0 +1,139 @@
+# .gitlab-ci.yml — team17 pipeline (copié du gabarit, job worker retiré :
+# pas de traitement asynchrone dans cette app, voir CCOE-RULES §0 KISS).
+#
+#   gitlab-ci-local --force-shell-executor                              # start
+#   gitlab-ci-local --force-shell-executor --variable ACTION=stop       # stop
+#   gitlab-ci-local --force-shell-executor --variable ACTION=purge      # purge
+
+stages:
+  - app-provision
+  - app-build
+  - app-image
+  - app-deploy
+  - app-verify
+  - app-stop
+  - app-purge
+
+variables:
+  APP: team17
+  TAG: dev
+  REGISTRY: localhost:5000     # always host-side — see the registry contract in README.md
+  PUBLIC_BUCKET: "0"           # 1 = a MinIO bucket in anonymous public read
+  ACTION: start                # start | stop | purge (override via --variable)
+
+# ============================================================================
+# Templates (hidden jobs — the `.` prefix makes them non-executed)
+# ============================================================================
+
+.on-start:
+  rules:
+    - if: $ACTION == "start"
+
+.bun-build:
+  extends: .on-start
+  stage: app-build
+  script:
+    - cd "$SERVICE"
+    - bun install --production    # Bun runs the TS — no compilation step
+
+.podman-image:
+  extends: .on-start
+  stage: app-image
+  script:
+    - podman build -t "$REGISTRY/$APP/$SERVICE:$TAG" "$SERVICE/"
+    - podman push   "$REGISTRY/$APP/$SERVICE:$TAG"
+
+# ============================================================================
+# ACTION=start
+# ============================================================================
+
+provision:
+  extends: .on-start
+  stage: app-provision
+  script:
+    - APP="$APP" PUBLIC_BUCKET="$PUBLIC_BUCKET" ./bootstrap.sh
+
+# --- Build: an explicit compilation CI-side (see CCOE-RULES.md §3.1) -------
+
+build-frontend:
+  extends: .on-start
+  stage: app-build
+  script:
+    - cd frontend
+    - bun install
+    - bun run build               # vite build (Bun as the package manager)
+
+build-api:
+  extends: .bun-build
+  variables: { SERVICE: api }
+
+# --- Image: a single-stage Dockerfile (uniform through the template) -------
+
+image-frontend:
+  extends: .podman-image
+  variables: { SERVICE: frontend }
+
+image-api:
+  extends: .podman-image
+  variables: { SERVICE: api }
+
+# --- Deploy + verify --------------------------------------------------------
+
+deploy:
+  extends: .on-start
+  stage: app-deploy
+  script:
+    - echo "[deploy] podman compose -p $APP up -d --force-recreate"
+    # --force-recreate: guarantees we restart on the images we have just pushed,
+    # otherwise podman-compose falls back on `podman start` (the old binary).
+    - podman compose -p "$APP" up -d --force-recreate
+
+verify:
+  extends: .on-start
+  stage: app-verify
+  script:
+    - |
+      set -e
+      echo "[verify] smoke test app"
+      ok=0
+      for _ in $(seq 1 30); do
+        if curl -sf http://localhost:8081/health >/dev/null && curl -sf http://localhost:8080/ >/dev/null; then
+          ok=1; break
+        fi
+        sleep 1
+      done
+      if [ "$ok" != "1" ]; then
+        echo "[verify] FAIL — services not reachable after 30s"
+        exit 1
+      fi
+      echo "  OK  api      http://localhost:8081/health"
+      echo "  OK  frontend http://localhost:8080"
+
+# ============================================================================
+# ACTION=stop: stops the containers, keeps the volumes + the Vault creds + the bucket
+# ============================================================================
+
+stop:
+  stage: app-stop
+  rules:
+    - if: $ACTION == "stop"
+  script:
+    - echo "[stop] podman compose -p $APP down"
+    - podman compose -p "$APP" down
+    - echo "[stop] the containers are down — the MinIO bucket, the Vault secrets and the app volumes are preserved."
+
+# ============================================================================
+# ACTION=purge: destroys the app's runtime state, preserves the user data
+# ============================================================================
+
+purge:
+  stage: app-purge
+  rules:
+    - if: $ACTION == "purge"
+  script:
+    - echo "[purge] podman compose -p $APP down --volumes"
+    - podman compose -p "$APP" down --volumes
+    - echo "[purge] removing the Vault secrets of $APP"
+    - vault kv metadata delete "secret/$APP/postgres" 2>/dev/null || true
+    - vault kv metadata delete "secret/$APP/minio"    2>/dev/null || true
+    - echo "[purge] done — the MinIO bucket + the Postgres DB are kept (see the header for an explicit rm)"

@@ -1,6 +1,42 @@
+# podman-compose.yml — team17 (liste de tâches)
+#
+# Deux services seulement : frontend (nginx:alpine, statique) + api (Bun).
+# Pas de worker : aucun traitement asynchrone, aucune file — une seule table
+# Postgres suffit (voir CCOE-RULES §0, KISS).
+#
+# Ports fixes imposés par cette machine (voir CLAUDE.md) : 8080 pour le
+# front, 8081 pour l'API — pas de bloc de 10 ports ici.
+
+name: ${APP}
+
+networks:
+  core-network:
+    external: true
+
 services:
+
   frontend:
-    image: nginx:alpine
-    volumes:
-      - ./index.html:/usr/share/nginx/html/index.html:ro
-    ports: ["8080:80"]
+    image: localhost:5000/${APP}/frontend:dev
+    container_name: ${APP}-frontend
+    restart: unless-stopped
+    networks: [core-network]
+    ports:
+      - "8080:80"
+
+  api:
+    image: localhost:5000/${APP}/api:dev
+    container_name: ${APP}-api
+    restart: unless-stopped
+    networks: [core-network]
+    environment:
+      VAULT_ADDR: http://openbao.internal:8200
+      VAULT_TOKEN: root-dev-token
+      VAULT_PATH: secret/${APP}
+    ports:
+      - "8081:8081"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8081/health"]
+      interval: 10s
+      timeout: 2s
+      retries: 3
+      start_period: 10s
